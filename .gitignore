@@ -1,0 +1,8 @@
+*.xml
+*.pdf
+.DS_STORE
+.python-version
+uv.lock
+.venv
+*.csv
+*.xl*
