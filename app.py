@@ -1,4 +1,7 @@
 import streamlit as st
+
+st.set_page_config(layout="wide")
+
 import xml.etree.ElementTree as ET
 import csv
 import io
@@ -23,66 +26,70 @@ def parse_xml_file(xml_content):
         tree = ET.parse(BytesIO(xml_content))
         root = tree.getroot()
         
-        # Extract UUID (last 12 characters)
+        # Extract UUID
         tfd = root.find('.//tfd:TimbreFiscalDigital', namespaces)
         uuid = tfd.get('UUID')[-12:] if tfd is not None else ''
         
-        # Extract RFC
+        # Extract Emisor details
         emisor = root.find('./cfdi:Emisor', namespaces)
         rfc = emisor.get('Rfc') if emisor is not None else ''
+        nombre = emisor.get('Nombre') if emisor is not None else ''
         
         # Extract TotalImpuestosTrasladados
         impuestos = root.find('./cfdi:Impuestos', namespaces)
         total_impuestos = impuestos.get('TotalImpuestosTrasladados') if impuestos is not None else '0'
         
-        # Extract Total amount
+        # Extract Total and Currency
         total = root.get('Total', '0')
+        currency = root.get('Moneda', '')
         
-        return [uuid, rfc, total_impuestos, total]
+        # Check for gasoline terms
+        xml_string = ET.tostring(root, encoding='unicode')
+        invoice_type = 'Gasoline' if 'Gasoline' in xml_string or 'Gasolina' in xml_string else 'Miscellaneous'
+        
+        # Return array matching headers order: [Nombre, UUID_Last_12, RFC_Emisor, Total_Impuestos, Total_Comprobante, Type, Currency]
+        return [nombre, uuid, rfc, total_impuestos, total, invoice_type, currency]
     
     except Exception as e:
-        return ['', '', '', '']
+        return ['', '', '', '', '', '', '']  # 7 empty values to match expected columns
 
 def main():
     st.title("XML Invoice Processor")
     
-    # File uploader
     uploaded_files = st.file_uploader("Upload XML files", type=['xml'], accept_multiple_files=True)
     
     if uploaded_files:
-        # Initialize results storage
         successful_files = []
         error_files = []
         all_data = []
-        headers = ['UUID_Last_12', 'RFC_Emisor', 'Total_Impuestos', 'Total_Comprobante']
+        headers = ['No.VDR', 'Nombre', 'UUID_Last_12', 'RFC_Emisor', 'Total_Impuestos', 
+                  'Total_Comprobante', 'Type', 'Currency']
         
         # Process each file
-        for uploaded_file in uploaded_files:
+        for idx, uploaded_file in enumerate(uploaded_files, 1):
             xml_content = uploaded_file.read()
             data = parse_xml_file(xml_content)
-            missing_fields = validate_xml_data(data)
-            
-            if missing_fields:
+            if len(data) == 7:  # Verify we have correct number of columns
+                successful_files.append(uploaded_file.name)
+                all_data.append([idx] + data)  # Add index as No.VDR
+            else:
                 error_files.append({
                     'filename': uploaded_file.name,
-                    'missing_fields': ', '.join(missing_fields)
+                    'missing_fields': 'Invalid data structure'
                 })
-            else:
-                successful_files.append(uploaded_file.name)
-                all_data.append(data)
         
-        # Display results
         if successful_files:
+            df = pd.DataFrame(all_data, columns=headers)
             st.success(f"Successfully processed {len(successful_files)} files")
             st.write("Processed files:")
             st.write(successful_files)
-            
-            # Create DataFrame and display
-            df = pd.DataFrame(all_data, columns=headers)
             st.write("Processed Data:")
-            st.dataframe(df)
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True
+            )
             
-            # Create download button for CSV
             csv_buffer = io.StringIO()
             df.to_csv(csv_buffer, index=False)
             csv_str = csv_buffer.getvalue()
@@ -98,6 +105,5 @@ def main():
             st.error("Some files had errors:")
             error_df = pd.DataFrame(error_files)
             st.dataframe(error_df)
-
 if __name__ == "__main__":
     main()
