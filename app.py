@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.set_page_config(layout="wide")
+st.set_page_config(layout="centered")
 
 import xml.etree.ElementTree as ET
 import csv
@@ -55,6 +55,15 @@ def parse_xml_file(xml_content):
 
 def main():
     st.title("XML Invoice Processor")
+
+    st.markdown("""
+    ### Instructions
+    
+    #### How to Use
+    Upload one or more XML invoice files using the file uploader below. 
+    The app will process each file and display the results in a table. 
+    You can download the complete results as a CSV file.
+    """)
     
     uploaded_files = st.file_uploader("Upload XML files", type=['xml'], accept_multiple_files=True)
     
