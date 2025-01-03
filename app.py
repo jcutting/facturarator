@@ -28,7 +28,7 @@ def parse_xml_file(xml_content):
         
         # Extract UUID
         tfd = root.find('.//tfd:TimbreFiscalDigital', namespaces)
-        uuid = tfd.get('UUID')[-12:] if tfd is not None else ''
+        uuid = tfd.get('UUID') if tfd is not None else ''
         
         # Extract Emisor details
         emisor = root.find('./cfdi:Emisor', namespaces)
