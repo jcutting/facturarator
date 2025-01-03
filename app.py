@@ -9,7 +9,7 @@ from io import BytesIO
 import pandas as pd
 
 def validate_xml_data(data):
-    required_fields = ['UUID_Last_12', 'RFC_Emisor', 'Total_Impuestos', 'Total_Comprobante']
+    required_fields = ['UUID', 'RFC_Emisor', 'Total_Impuestos', 'Total_Comprobante']
     missing_fields = []
     for field in required_fields:
         if not data[required_fields.index(field)]:
@@ -47,7 +47,7 @@ def parse_xml_file(xml_content):
         xml_string = ET.tostring(root, encoding='unicode')
         invoice_type = 'Gasoline' if 'Gasoline' in xml_string or 'Gasolina' in xml_string else 'Miscellaneous'
         
-        # Return array matching headers order: [Nombre, UUID_Last_12, RFC_Emisor, Total_Impuestos, Total_Comprobante, Type, Currency]
+        # Return array matching headers order: [Nombre, UUID, RFC_Emisor, Total_Impuestos, Total_Comprobante, Type, Currency]
         return [nombre, uuid, rfc, total_impuestos, total, invoice_type, currency]
     
     except Exception as e:
@@ -72,7 +72,7 @@ def main():
         successful_files = []
         error_files = []
         all_data = []
-        headers = ['No.VDR', 'Nombre', 'UUID_Last_12', 'RFC_Emisor', 'Total_Impuestos', 
+        headers = ['No.VDR', 'Nombre', 'UUID', 'RFC_Emisor', 'Total_Impuestos', 
                   'Total_Comprobante', 'Type', 'Currency']
         
         # Process each file
