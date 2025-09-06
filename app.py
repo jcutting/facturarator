@@ -19,6 +19,7 @@ def seq_label(n: int, width: int = 2) -> str:
     """Return zero-padded label like '01', '02'."""
     return str(n).zfill(width)
 
+
 def normalize_name(name: str) -> str:
     """
     Robust filename normalizer for matching:
@@ -35,6 +36,7 @@ def normalize_name(name: str) -> str:
     stem = unicodedata.normalize("NFKC", stem).lower().strip()
     stem = re.sub(r"[^0-9a-z]+", "-", stem).strip("-")
     return stem
+
 
 def clean_num(val) -> float:
     """Return a finite float; coerce blanks/strings/NaN/Inf to 0.0."""
@@ -58,18 +60,22 @@ def clean_num(val) -> float:
 # ------------------------------
 def parse_cfdi(xml_bytes):
     """
-    Minimal fields needed for the IVA submission grid + Fecha for sorting:
-      UUID, RFC_Emisor, Total_Impuestos (IVA trasladado), Total_Comprobante, Currency, Fecha
+    Extract minimal fields for the IVA submission grid + Fecha for sorting.
+    FIX: VAT (IVA) is taken from ONE source only to avoid double counting:
+      1) Prefer global 'TotalImpuestosTrasladados' if present
+      2) Else sum ROOT-LEVEL Traslados (Impuestos/Traslados)
+      3) Else sum PER-CONCEPT Traslados (Conceptos/Concepto/Impuestos/Traslados)
     """
     ns = {
         "cfdi33": "http://www.sat.gobmx/cfd/3",
         "cfdi33_alt": "http://www.sat.gob.mx/cfd/3",
         "cfdi40": "http://www.sat.gob.mx/cfd/4",
-        "cfdi40_alt": "http://www.sat.gobmx/cfd/4",
+        "cfdi40_alt": "http://www.sat.gob.mx/cfd/4",
         "tfd": "http://www.sat.gob.mx/TimbreFiscalDigital",
     }
     root = ET.fromstring(xml_bytes)
 
+    # choose CFDI namespace (3.3 vs 4.0)
     tag = root.tag
     ckey = "cfdi40" if ("cfd/4" in tag or "cfd/4" in json.dumps(root.attrib)) else "cfdi33"
     cns = ns.get(ckey, ns["cfdi40"])
@@ -96,30 +102,59 @@ def parse_cfdi(xml_bytes):
     currency = root.get("Moneda", "") or "MXN"
     total = root.get("Total", "") or "0"
 
-    # Fecha (for chronological sorting)
-    fecha_raw = (root.get("Fecha", "") or "")[:10]  # 'YYYY-MM-DD'
+    # Fecha (YYYY-MM-DD) for chronological ordering
+    fecha_raw = (root.get("Fecha", "") or "")[:10]
     try:
         fecha_dt = datetime.strptime(fecha_raw, "%Y-%m-%d")
     except Exception:
         fecha_dt = datetime(1970, 1, 1)
 
-    # IVA (Traslados Impuesto=002)
-    iva_sum = 0.0
-    for t in fa(".//cfdi:Traslados/cfdi:Traslado"):
-        if t.get("Impuesto") in ("002", "2"):
-            try:
-                iva_sum += float(t.get("Importe", "0") or "0")
-            except Exception:
-                pass
+    # ---------- IVA (Impuesto "002") WITHOUT DOUBLE COUNTING ----------
+    iva_sum = None
+
+    # 1) Prefer the stamped global total when available
+    imps = f("./cfdi:Impuestos")
+    if imps is not None:
+        for k in ("TotalImpuestosTrasladados", "TotalTraslados"):
+            v = imps.get(k)
+            if v:
+                try:
+                    iva_sum = float(v)
+                    break
+                except Exception:
+                    pass
+
+    # 2) Else sum ONLY root-level Traslados
+    if iva_sum is None:
+        total_root = 0.0
+        for t in fa("./cfdi:Impuestos/cfdi:Traslados/cfdi:Traslado"):
+            if t.get("Impuesto") in ("002", "2"):
+                try:
+                    total_root += float(t.get("Importe", "0") or 0)
+                except Exception:
+                    pass
+        if total_root:
+            iva_sum = total_root
+
+    # 3) Else sum ONLY per-concept Traslados
+    if iva_sum is None:
+        total_concepts = 0.0
+        for t in fa("./cfdi:Conceptos/cfdi:Concepto/cfdi:Impuestos/cfdi:Traslados/cfdi:Traslado"):
+            if t.get("Impuesto") in ("002", "2"):
+                try:
+                    total_concepts += float(t.get("Importe", "0") or 0)
+                except Exception:
+                    pass
+        iva_sum = total_concepts
 
     return {
         "UUID": uuid,
         "RFC_Emisor": rfc_emisor,
-        "Total_Impuestos": iva_sum,
+        "Total_Impuestos": iva_sum,      # Correct IVA (no double count)
         "Total_Comprobante": total,
         "Currency": currency,
-        "Type": "Miscellaneous",  # default; user can change in UI
-        "Fecha": fecha_dt,        # internal only (not exported to Excel)
+        "Type": "Miscellaneous",          # default; editable in UI
+        "Fecha": fecha_dt,                # internal; used for sorting
     }
 
 
