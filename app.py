@@ -1,6 +1,6 @@
 import io
-import json
 import os
+import json
 import zipfile
 from datetime import datetime
 from xml.etree import ElementTree as ET
@@ -235,18 +235,18 @@ def build_submission_excel_from_df(
 
 
 # ------------------------------
-# STREAMLIT APP
+# STREAMLIT APP (ONE DOWNLOAD)
 # ------------------------------
-st.set_page_config(page_title="Personal IVA – Excel & ZIP Builder", layout="wide")
-st.title("Personal IVA – Excel & ZIP Builder")
+st.set_page_config(page_title="Personal IVA – One-Click Package", layout="wide")
+st.title("Personal IVA – One-Click Submission Package")
 
 st.markdown(
-    "Upload your **CFDI XML** and **matching PDF facturas**.\n\n"
-    "- Entries are sorted **chronologically** by the XML `Fecha`.\n"
-    "- **No. VDR** is assigned as *text* with leading zeros (e.g., 01, 02, 03).\n"
-    "- XML and PDF are **matched by filename stem** (name without extension).\n"
-    "- ZIP includes **only PDFs**, renamed to the row number: `01.pdf`, `02.pdf`, …\n"
-    "- Provide claimant details; they appear in the Excel header."
+    "Upload **CFDI XML** and **matching PDF facturas** (same filename, different extension).\n\n"
+    "This will:\n"
+    "1) Parse XML, sort entries **chronologically**, and number rows **01, 02, …**\n"
+    "2) Build **SUBMISSION_IVA_FORM.xlsx** (slide layout)\n"
+    "3) Create **Facturas_PDFs.zip** with **only PDFs**, renamed to **row number** (`01.pdf`, `02.pdf`, …)\n"
+    "4) Give you **one download**: `Submission_Package.zip` containing both files\n"
 )
 
 # Claimant details (appear in Excel)
@@ -258,7 +258,6 @@ with col_b:
 with col_c:
     ssn_last4 = st.text_input("SSN (LAST 4 DIGITS)", value="", max_chars=4)
 with col_d:
-    # Requested month auto: current month + year
     now = datetime.now()
     requested_month = now.strftime("%B %Y")
     st.write("**Requested month**")
@@ -302,12 +301,12 @@ if xml_up:
     # Assign No.VDR as zero-padded text (01, 02, 03)
     df.insert(0, "No.VDR", [seq_label(i + 1, 2) for i in range(len(df))])
 
-    # Build PDF stem index
+    # Build PDF bytes map by stem
     pdf_map = {}
     if pdf_up:
         for p in pdf_up:
             stem = os.path.splitext(p.name)[0].lower()
-            pdf_map[stem] = p.getvalue()  # content bytes
+            pdf_map[stem] = p.getvalue()
 
     # Match PDFs by stem == XML stem (case-insensitive)
     def pdf_name_for_row(r):
@@ -316,8 +315,7 @@ if xml_up:
 
     df["PDF_FileName"] = df.apply(pdf_name_for_row, axis=1)
 
-    # Show editable grid (Type + Currency as dropdowns). We include Fecha for visibility,
-    # but Excel export will NOT include Fecha.
+    # Preview / Edit
     st.subheader("Preview / Edit (chronological)")
     show_cols = [
         "No.VDR",
@@ -339,91 +337,85 @@ if xml_up:
             "Currency": st.column_config.SelectboxColumn(options=["MXN", "USD"]),
         },
         use_container_width=True,
-        height=500,
+        height=480,
     )
 
-    st.caption(
-        "Note: the Excel **only** contains the columns shown in the slide "
-        "(No. VDR, UUID, RFC, VAT, TOTAL, Type, Currency). "
-        "Other columns here are for your convenience and will not be exported."
-    )
+    # One-click: build Excel, PDFs zip, then wrap both in Submission_Package.zip
+    if st.button("Build Submission Package (one download)"):
+        # Re-sort and re-label to ensure consistency with any edits
+        tmp = edited.copy()
+        if "Fecha" in tmp.columns:
+            tmp = tmp.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
+        tmp["No.VDR"] = [seq_label(i + 1, 2) for i in range(len(tmp))]
 
-    c1, c2 = st.columns(2)
+        # Validate & gather warnings
+        warnings = []
+        # UUID length check
+        bad_uuid_rows = [str(r["No.VDR"]) for _, r in tmp.iterrows() if len(str(r.get("UUID",""))) != 36]
+        if bad_uuid_rows:
+            warnings.append("UUID not 36 chars for rows: " + ", ".join(bad_uuid_rows))
 
-    with c1:
-        if st.button("Generate Excel (Submission Template)"):
-            # Ensure ordering by Fecha before export, re-assign No.VDR (as text) in case user edited
-            tmp = edited.copy()
-            if "Fecha" in tmp.columns:
-                tmp = tmp.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
-            tmp["No.VDR"] = [seq_label(i + 1, 2) for i in range(len(tmp))]
+        # Missing PDFs check by stem
+        missing_pdfs = []
+        for _, r in tmp.iterrows():
+            stem = os.path.splitext(str(r.get("XML_FileName","")))[0].lower()
+            if not stem or stem not in pdf_map:
+                missing_pdfs.append(str(r.get("No.VDR","")))
+        if missing_pdfs:
+            warnings.append("Missing matching PDF for rows: " + ", ".join(missing_pdfs))
 
-            # Build only the required columns for Excel
-            export_df = tmp[
-                [
-                    "No.VDR",
-                    "UUID",
-                    "RFC_Emisor",
-                    "Total_Impuestos",
-                    "Total_Comprobante",
-                    "Type",
-                    "Currency",
-                ]
-            ].copy()
+        # Build Excel (export only required columns)
+        export_df = tmp[
+            ["No.VDR", "UUID", "RFC_Emisor", "Total_Impuestos", "Total_Comprobante", "Type", "Currency"]
+        ].copy()
+        xlsx_bytes = build_submission_excel_from_df(
+            export_df,
+            claimant_name=claimant_name.strip(),
+            official_email=official_email.strip(),
+            ssn_last4=ssn_last4.strip(),
+            requested_month_text=requested_month,
+        )
 
-            xlsx_bytes = build_submission_excel_from_df(
-                export_df,
-                claimant_name=claimant_name.strip(),
-                official_email=official_email.strip(),
-                ssn_last4=ssn_last4.strip(),
-                requested_month_text=requested_month,
+        # Build inner PDFs-only zip with renamed files as 01.pdf, 02.pdf...
+        pdf_zip_bytes = io.BytesIO()
+        with zipfile.ZipFile(pdf_zip_bytes, "w", zipfile.ZIP_DEFLATED) as z:
+            for _, r in tmp.iterrows():
+                rownum = str(r.get("No.VDR", "") or "").strip()
+                stem = os.path.splitext(str(r.get("XML_FileName", "")))[0].lower()
+                if rownum and stem in pdf_map:
+                    z.writestr(f"{rownum}.pdf", pdf_map[stem])
+        pdf_zip_bytes.seek(0)
+
+        # Wrap both artifacts in one outer package
+        outer = io.BytesIO()
+        with zipfile.ZipFile(outer, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("SUBMISSION_IVA_FORM.xlsx", xlsx_bytes)
+            z.writestr("Facturas_PDFs.zip", pdf_zip_bytes.getvalue())
+            # Optional tiny readme
+            readme = (
+                "This package contains:\n"
+                "- SUBMISSION_IVA_FORM.xlsx (Excel to email)\n"
+                "- Facturas_PDFs.zip (ZIP to email; contains only PDFs named 01.pdf, 02.pdf, ...)\n"
+                "\n"
+                "Note: If any warnings were shown in the app, please resolve them before sending.\n"
             )
-            st.download_button(
-                "Download SUBMISSION_IVA_FORM.xlsx",
-                xlsx_bytes,
-                file_name="SUBMISSION_IVA_FORM.xlsx",
-            )
+            z.writestr("README.txt", readme)
+        outer.seek(0)
 
-    with c2:
-        if st.button("Build ZIP of PDFs (renamed to row number)"):
-            if not pdf_up:
-                st.error("Please upload the factura PDFs first.")
-            else:
-                # Sort by Fecha again, re-number rows 01..N, then add PDFs as 01.pdf, 02.pdf...
-                tmp = edited.copy()
-                if "Fecha" in tmp.columns:
-                    tmp = tmp.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
-                tmp["No.VDR"] = [seq_label(i + 1, 2) for i in range(len(tmp))]
+        st.download_button(
+            "Download Submission_Package.zip",
+            outer.getvalue(),
+            file_name="Submission_Package.zip",
+        )
 
-                buf = io.BytesIO()
-                errors = []
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-                    for _, r in tmp.iterrows():
-                        label = str(r.get("No.VDR", "") or "").strip()
-                        xml_stem = os.path.splitext(str(r.get("XML_FileName", "")))[0].lower()
-                        if not label:
-                            errors.append("Missing No.VDR label for a row.")
-                            continue
-                        if not xml_stem or xml_stem not in pdf_map:
-                            errors.append(f"No matching PDF found for XML '{xml_stem or '?'}'.")
-                            continue
-                        z.writestr(f"{label}.pdf", pdf_map[xml_stem])
+        # Show warnings (non-blocking)
+        if carnet_up is not None:
+            size_mb = len(carnet_up.getvalue()) / (1024 * 1024)
+            if size_mb > 3:
+                warnings.append(f"Carnet PDF is {size_mb:.2f} MB (>3 MB). Consider compressing to ≤ 3 MB.")
 
-                st.download_button(
-                    "Download Facturas_PDFs.zip", buf.getvalue(), file_name="Facturas_PDFs.zip"
-                )
-                if errors:
-                    st.warning("Some issues:\n- " + "\n- ".join(errors))
-
-    # Carnet warning only (no blocking)
-    if carnet_up is not None:
-        size_mb = len(carnet_up.getvalue()) / (1024 * 1024)
-        if size_mb > 3:
-            st.warning(
-                f"Carnet PDF is {size_mb:.2f} MB (>3 MB). Consider compressing to ≤ 3 MB (portrait)."
-            )
-        else:
-            st.info(f"Carnet PDF size looks OK: {size_mb:.2f} MB (≤ 3 MB).")
+        if warnings:
+            st.warning("Warnings:\n- " + "\n- ".join(warnings))
 
 else:
     st.info("Upload your CFDI XML files to begin.")
