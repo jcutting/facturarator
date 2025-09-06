@@ -2,6 +2,7 @@ import io
 import os
 import re
 import json
+import math
 import zipfile
 import unicodedata
 from datetime import datetime
@@ -21,25 +22,35 @@ def seq_label(n: int, width: int = 2) -> str:
 def normalize_name(name: str) -> str:
     """
     Robust filename normalizer for matching:
-    - take basename
+    - basename only
     - unicode normalize
     - lowercase
-    - strip extension if present
-    - collapse any non-alphanumeric (including slashes, spaces, colons) to single '-'
-    - trim leading/trailing '-'
+    - strip extension
+    - collapse any non-alphanumeric (incl. slashes/spaces/colons) to single '-'
     """
     if not name:
         return ""
     base = os.path.basename(name)
-    # strip extension
     stem, _ = os.path.splitext(base)
-    # unicode normalize
-    stem = unicodedata.normalize("NFKC", stem)
-    stem = stem.lower().strip()
-    # collapse non-alnum
-    stem = re.sub(r"[^0-9a-z]+", "-", stem)
-    stem = stem.strip("-")
+    stem = unicodedata.normalize("NFKC", stem).lower().strip()
+    stem = re.sub(r"[^0-9a-z]+", "-", stem).strip("-")
     return stem
+
+def clean_num(val) -> float:
+    """Return a finite float; coerce blanks/strings/NaN/Inf to 0.0."""
+    try:
+        if val is None:
+            return 0.0
+        if isinstance(val, str):
+            s = val.strip().replace(",", "")
+            if s == "":
+                return 0.0
+            x = float(s)
+        else:
+            x = float(val)
+        return x if math.isfinite(x) else 0.0
+    except Exception:
+        return 0.0
 
 
 # ------------------------------
@@ -59,7 +70,6 @@ def parse_cfdi(xml_bytes):
     }
     root = ET.fromstring(xml_bytes)
 
-    # choose CFDI namespace
     tag = root.tag
     ckey = "cfdi40" if ("cfd/4" in tag or "cfd/4" in json.dumps(root.attrib)) else "cfdi33"
     cns = ns.get(ckey, ns["cfdi40"])
@@ -91,7 +101,7 @@ def parse_cfdi(xml_bytes):
     try:
         fecha_dt = datetime.strptime(fecha_raw, "%Y-%m-%d")
     except Exception:
-        fecha_dt = datetime(1970, 1, 1)  # fallback if missing
+        fecha_dt = datetime(1970, 1, 1)
 
     # IVA (Traslados Impuesto=002)
     iva_sum = 0.0
@@ -161,7 +171,7 @@ def build_submission_excel_from_df(
 
         # Column widths (A..G)
         ws.set_column("A:A", 10)  # No. VDR
-        ws.set_column("B:B", 44)  # UUID (Factura Number per slide)
+        ws.set_column("B:B", 44)  # UUID
         ws.set_column("C:C", 18)  # RFC
         ws.set_column("D:D", 14)  # VAT
         ws.set_column("E:E", 14)  # TOTAL
@@ -171,7 +181,7 @@ def build_submission_excel_from_df(
         # Title
         ws.merge_range("A1:G1", "SUBMISSION IVA FORM", title_fmt)
 
-        # Top info rows (exact labels from slide)
+        # Top info
         ws.write("A2", "REQUESTED MONTH:", head_lbl)
         ws.write("B2", requested_month_text, head_val)
 
@@ -211,47 +221,31 @@ def build_submission_excel_from_df(
         if df.empty:
             df.loc[0] = ["01", "", "", 0.0, 0.0, "Miscellaneous", "MXN"]
 
-        # Write table rows (No.VDR kept as TEXT with leading zeros)
+        # Write table rows (No.VDR kept as TEXT)
         start = 5
         for i, row in df.iterrows():
             ws.write(start + i, 0, str(row["No.VDR"]), center)  # keep leading zeros
             ws.write(start + i, 1, str(row["UUID"]), cell)
             ws.write(start + i, 2, str(row["RFC_Emisor"]), cell)
 
-            # numeric VAT/TOTAL
-            try:
-                vat = float(row["Total_Impuestos"] or 0)
-            except Exception:
-                vat = 0.0
-            try:
-                tot = float(row["Total_Comprobante"] or 0)
-            except Exception:
-                tot = 0.0
-
+            vat = clean_num(row.get("Total_Impuestos"))
+            tot = clean_num(row.get("Total_Comprobante"))
             ws.write_number(start + i, 3, vat, money)
             ws.write_number(start + i, 4, tot, money)
             ws.write(start + i, 5, str(row["Type"] or "Miscellaneous"), cell)
             ws.write(start + i, 6, str(row["Currency"] or "MXN"), center)
 
-        # Validations on body range
+        # Validations
         last = start + max(len(df), 50)
-        ws.data_validation(
-            start, 5, last, 5, {"validate": "list", "source": ["Miscellaneous", "Gasoline"]}
-        )
+        ws.data_validation(start, 5, last, 5, {"validate": "list", "source": ["Miscellaneous", "Gasoline"]})
         ws.data_validation(start, 6, last, 6, {"validate": "list", "source": ["MXN", "USD"]})
         ws.data_validation(
-            start,
-            1,
-            last,
-            1,
+            start, 1, last, 1,
             {
-                "validate": "length",
-                "criteria": "equal to",
-                "value": 36,
+                "validate": "length", "criteria": "equal to", "value": 36,
                 "input_title": "Folio Fiscal (UUID)",
                 "input_message": "Debe tener exactamente 36 caracteres (incluye guiones).",
-                "error_title": "Longitud inválida",
-                "error_message": "El UUID debe tener 36 caracteres.",
+                "error_title": "Longitud inválida", "error_message": "El UUID debe tener 36 caracteres.",
             },
         )
 
@@ -263,7 +257,7 @@ def build_submission_excel_from_df(
 # STREAMLIT APP (ONE FLAT ZIP)
 # ------------------------------
 st.set_page_config(page_title="Personal IVA – One-Click Package", layout="wide")
-st.title("Personal IVA – One-Click Submission Package (Flat ZIP + Robust Matching)")
+st.title("Personal IVA – One-Click Submission Package (Flat ZIP)")
 
 st.markdown(
     "Upload **CFDI XML** and **matching PDF facturas** (same filename, different extension).\n\n"
@@ -271,10 +265,10 @@ st.markdown(
     "1) Parse XML, sort entries **chronologically**, and number rows **01, 02, …**\n"
     "2) Build **SUBMISSION_IVA_FORM.xlsx** (slide layout)\n"
     "3) Create a **single flat ZIP** containing the Excel **and** the renamed PDFs (`01.pdf`, `02.pdf`, …)\n"
-    "   \n**Now with robust filename matching** (handles spaces, slashes, punctuation) and UUID fallback."
+    "\n**Robust filename matching** with normalization and UUID fallback."
 )
 
-# Claimant details (appear in Excel)
+# Claimant details
 col_a, col_b, col_c, col_d = st.columns([1.2, 1.2, 1, 0.9])
 with col_a:
     claimant_name = st.text_input("CLAIMANT NAME", value="", placeholder="First Last")
@@ -295,12 +289,12 @@ carnet_up = st.file_uploader("Upload SRE Carnet (optional – warning only)", ty
 
 rows = []
 if xml_up:
-    # Parse all XMLs (collect Fecha for sorting)
+    # Parse XMLs
     for f in xml_up:
         try:
             row = parse_cfdi(f.read())
             row["XML_FileName"] = f.name
-            row["XML_Stem"] = normalize_name(f.name)          # normalized
+            row["XML_Stem"] = normalize_name(f.name)
             row["XML_Stem_raw"] = os.path.splitext(os.path.basename(f.name))[0]
             rows.append(row)
         except Exception as e:
@@ -322,15 +316,15 @@ if xml_up:
 
     df = pd.DataFrame(rows)
 
-    # Chronological order by Fecha (ascending)
+    # Chronological order
     df = df.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
 
-    # Assign No.VDR as zero-padded text (01, 02, 03)
+    # Zero-padded No.VDR
     df.insert(0, "No.VDR", [seq_label(i + 1, 2) for i in range(len(df))])
 
-    # Build PDF bytes map by normalized stem
+    # Build PDF map
     pdf_map = {}
-    pdf_name_lookup = {}   # normalized stem -> original pdf name (for messages)
+    pdf_name_lookup = {}
     if pdf_up:
         for p in pdf_up:
             nstem = normalize_name(p.name)
@@ -343,12 +337,11 @@ if xml_up:
         uuid = str(r.get("UUID", "") or "").lower()
         if nstem in pdf_map:
             return pdf_name_lookup[nstem]
-        # fallback: search any PDF name containing UUID (or first 8 chars)
         if uuid:
             short = uuid[:8]
-            for key, orig_name in pdf_name_lookup.items():
+            for key, orig in pdf_name_lookup.items():
                 if uuid in key or short in key:
-                    return orig_name
+                    return orig
         return ""
 
     df["PDF_FileName"] = df.apply(pdf_name_for_row, axis=1)
@@ -380,11 +373,19 @@ if xml_up:
 
     # One-click: build Excel + flat ZIP (Excel + PDFs at root)
     if st.button("Build Submission Package (flat ZIP)"):
-        # Re-sort and re-label to ensure consistency with any edits
+        # Re-sort & re-label
         tmp = edited.copy()
         if "Fecha" in tmp.columns:
             tmp = tmp.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
         tmp["No.VDR"] = [seq_label(i + 1, 2) for i in range(len(tmp))]
+
+        # Pre-sanitize numeric columns to avoid NaN/Inf
+        for col in ("Total_Impuestos", "Total_Comprobante"):
+            tmp[col] = (
+                pd.to_numeric(tmp[col], errors="coerce")
+                  .replace([float("inf"), float("-inf")], float("nan"))
+                  .fillna(0.0)
+            )
 
         # Validate & gather warnings
         warnings = []
@@ -392,7 +393,7 @@ if xml_up:
         if bad_uuid_rows:
             warnings.append("UUID not 36 chars for rows: " + ", ".join(bad_uuid_rows))
 
-        # Build a fresh normalized pdf map (in case names were re-uploaded)
+        # Fresh PDF maps
         pdf_map = {}
         pdf_name_lookup = {}
         if pdf_up:
@@ -401,10 +402,11 @@ if xml_up:
                 pdf_map[nstem] = p.getvalue()
                 pdf_name_lookup[nstem] = os.path.basename(p.name)
 
-        # Build Excel (export only required columns)
+        # Build Excel (only required columns)
         export_df = tmp[
             ["No.VDR", "UUID", "RFC_Emisor", "Total_Impuestos", "Total_Comprobante", "Type", "Currency"]
         ].copy()
+
         xlsx_bytes = build_submission_excel_from_df(
             export_df,
             claimant_name=claimant_name.strip(),
@@ -413,42 +415,40 @@ if xml_up:
             requested_month_text=requested_month,
         )
 
-        # Build ONE flat package: Excel + PDFs at root (01.pdf, 02.pdf, ...)
+        # Build one flat ZIP: Excel + PDFs at root (01.pdf, 02.pdf, ...)
         missing_pdfs_detail = []
         outer = io.BytesIO()
         with zipfile.ZipFile(outer, "w", zipfile.ZIP_DEFLATED) as z:
-            # Excel at root
+            # Excel
             z.writestr("SUBMISSION_IVA_FORM.xlsx", xlsx_bytes)
-            # PDFs at root, renamed by row number
+            # PDFs by row number
             for _, r in tmp.iterrows():
                 rownum = str(r.get("No.VDR", "") or "").strip()
-                # Use normalized XML stem for lookup; fallback to UUID match
                 xml_stem_raw = os.path.splitext(os.path.basename(str(r.get("XML_FileName",""))))[0]
                 nstem = normalize_name(xml_stem_raw)
                 uuid = str(r.get("UUID","") or "").lower()
-                if rownum:
-                    if nstem in pdf_map:
-                        z.writestr(f"{rownum}.pdf", pdf_map[nstem])
-                    else:
-                        # fallback by UUID substring
-                        placed = False
-                        if uuid:
-                            short = uuid[:8]
-                            for key, data in pdf_map.items():
-                                if uuid in key or short in key:
-                                    z.writestr(f"{rownum}.pdf", data)
-                                    placed = True
-                                    break
-                        if not placed:
-                            missing_pdfs_detail.append(f"{rownum} (expected stem ~ '{nstem}')")
+                if not rownum:
+                    continue
+                if nstem in pdf_map:
+                    z.writestr(f"{rownum}.pdf", pdf_map[nstem])
+                else:
+                    # fallback by UUID substring
+                    placed = False
+                    if uuid:
+                        short = uuid[:8]
+                        for key, data in pdf_map.items():
+                            if uuid in key or short in key:
+                                z.writestr(f"{rownum}.pdf", data)
+                                placed = True
+                                break
+                    if not placed:
+                        missing_pdfs_detail.append(f"{rownum} (expected stem ~ '{nstem}')")
 
             # Optional readme
             readme = (
                 "This package contains:\n"
                 "- SUBMISSION_IVA_FORM.xlsx (Excel to email)\n"
                 "- PDFs named 01.pdf, 02.pdf, ... (rename rule = No. VDR)\n"
-                "\n"
-                "If any warnings were shown in the app, please resolve and rebuild.\n"
             )
             z.writestr("README.txt", readme)
         outer.seek(0)
@@ -459,7 +459,7 @@ if xml_up:
             file_name="Submission_Package.zip",
         )
 
-        # Show warnings (non-blocking)
+        # Warnings (non-blocking)
         if carnet_up is not None:
             size_mb = len(carnet_up.getvalue()) / (1024 * 1024)
             if size_mb > 3:
