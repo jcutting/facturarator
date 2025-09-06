@@ -235,18 +235,17 @@ def build_submission_excel_from_df(
 
 
 # ------------------------------
-# STREAMLIT APP (ONE DOWNLOAD)
+# STREAMLIT APP (ONE FLAT ZIP)
 # ------------------------------
 st.set_page_config(page_title="Personal IVA – One-Click Package", layout="wide")
-st.title("Personal IVA – One-Click Submission Package")
+st.title("Personal IVA – One-Click Submission Package (Flat ZIP)")
 
 st.markdown(
     "Upload **CFDI XML** and **matching PDF facturas** (same filename, different extension).\n\n"
     "This will:\n"
     "1) Parse XML, sort entries **chronologically**, and number rows **01, 02, …**\n"
     "2) Build **SUBMISSION_IVA_FORM.xlsx** (slide layout)\n"
-    "3) Create **Facturas_PDFs.zip** with **only PDFs**, renamed to **row number** (`01.pdf`, `02.pdf`, …)\n"
-    "4) Give you **one download**: `Submission_Package.zip` containing both files\n"
+    "3) Create a **single flat ZIP** containing the Excel **and** the renamed PDFs (`01.pdf`, `02.pdf`, …)\n"
 )
 
 # Claimant details (appear in Excel)
@@ -340,8 +339,8 @@ if xml_up:
         height=480,
     )
 
-    # One-click: build Excel, PDFs zip, then wrap both in Submission_Package.zip
-    if st.button("Build Submission Package (one download)"):
+    # One-click: build Excel + flat ZIP (Excel + PDFs at root)
+    if st.button("Build Submission Package (flat ZIP)"):
         # Re-sort and re-label to ensure consistency with any edits
         tmp = edited.copy()
         if "Fecha" in tmp.columns:
@@ -350,12 +349,10 @@ if xml_up:
 
         # Validate & gather warnings
         warnings = []
-        # UUID length check
         bad_uuid_rows = [str(r["No.VDR"]) for _, r in tmp.iterrows() if len(str(r.get("UUID",""))) != 36]
         if bad_uuid_rows:
             warnings.append("UUID not 36 chars for rows: " + ", ".join(bad_uuid_rows))
 
-        # Missing PDFs check by stem
         missing_pdfs = []
         for _, r in tmp.iterrows():
             stem = os.path.splitext(str(r.get("XML_FileName","")))[0].lower()
@@ -376,28 +373,24 @@ if xml_up:
             requested_month_text=requested_month,
         )
 
-        # Build inner PDFs-only zip with renamed files as 01.pdf, 02.pdf...
-        pdf_zip_bytes = io.BytesIO()
-        with zipfile.ZipFile(pdf_zip_bytes, "w", zipfile.ZIP_DEFLATED) as z:
+        # Build ONE flat package: Excel + PDFs at root (01.pdf, 02.pdf, ...)
+        outer = io.BytesIO()
+        with zipfile.ZipFile(outer, "w", zipfile.ZIP_DEFLATED) as z:
+            # Excel at root
+            z.writestr("SUBMISSION_IVA_FORM.xlsx", xlsx_bytes)
+            # PDFs at root, renamed by row number
             for _, r in tmp.iterrows():
                 rownum = str(r.get("No.VDR", "") or "").strip()
                 stem = os.path.splitext(str(r.get("XML_FileName", "")))[0].lower()
                 if rownum and stem in pdf_map:
                     z.writestr(f"{rownum}.pdf", pdf_map[stem])
-        pdf_zip_bytes.seek(0)
-
-        # Wrap both artifacts in one outer package
-        outer = io.BytesIO()
-        with zipfile.ZipFile(outer, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("SUBMISSION_IVA_FORM.xlsx", xlsx_bytes)
-            z.writestr("Facturas_PDFs.zip", pdf_zip_bytes.getvalue())
-            # Optional tiny readme
+            # Optional readme
             readme = (
                 "This package contains:\n"
                 "- SUBMISSION_IVA_FORM.xlsx (Excel to email)\n"
-                "- Facturas_PDFs.zip (ZIP to email; contains only PDFs named 01.pdf, 02.pdf, ...)\n"
+                "- PDFs named 01.pdf, 02.pdf, ... (rename rule = No. VDR)\n"
                 "\n"
-                "Note: If any warnings were shown in the app, please resolve them before sending.\n"
+                "If any warnings were shown in the app, please resolve and rebuild.\n"
             )
             z.writestr("README.txt", readme)
         outer.seek(0)
