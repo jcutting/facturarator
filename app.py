@@ -1,6 +1,3 @@
-Here’s the complete `app.py` with the VAT double-counting fix, robust PDF matching, NaN/Inf sanitization, chronological sort, zero-padded row numbers, claimant header fields, **one flat ZIP download**, and a **timestamp** appended to the download filename (localized to **America/Mexico\_City**):
-
-```python
 import io
 import os
 import re
