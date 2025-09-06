@@ -1,7 +1,9 @@
 import io
 import os
+import re
 import json
 import zipfile
+import unicodedata
 from datetime import datetime
 from xml.etree import ElementTree as ET
 
@@ -15,6 +17,29 @@ import streamlit as st
 def seq_label(n: int, width: int = 2) -> str:
     """Return zero-padded label like '01', '02'."""
     return str(n).zfill(width)
+
+def normalize_name(name: str) -> str:
+    """
+    Robust filename normalizer for matching:
+    - take basename
+    - unicode normalize
+    - lowercase
+    - strip extension if present
+    - collapse any non-alphanumeric (including slashes, spaces, colons) to single '-'
+    - trim leading/trailing '-'
+    """
+    if not name:
+        return ""
+    base = os.path.basename(name)
+    # strip extension
+    stem, _ = os.path.splitext(base)
+    # unicode normalize
+    stem = unicodedata.normalize("NFKC", stem)
+    stem = stem.lower().strip()
+    # collapse non-alnum
+    stem = re.sub(r"[^0-9a-z]+", "-", stem)
+    stem = stem.strip("-")
+    return stem
 
 
 # ------------------------------
@@ -238,7 +263,7 @@ def build_submission_excel_from_df(
 # STREAMLIT APP (ONE FLAT ZIP)
 # ------------------------------
 st.set_page_config(page_title="Personal IVA – One-Click Package", layout="wide")
-st.title("Personal IVA – One-Click Submission Package (Flat ZIP)")
+st.title("Personal IVA – One-Click Submission Package (Flat ZIP + Robust Matching)")
 
 st.markdown(
     "Upload **CFDI XML** and **matching PDF facturas** (same filename, different extension).\n\n"
@@ -246,6 +271,7 @@ st.markdown(
     "1) Parse XML, sort entries **chronologically**, and number rows **01, 02, …**\n"
     "2) Build **SUBMISSION_IVA_FORM.xlsx** (slide layout)\n"
     "3) Create a **single flat ZIP** containing the Excel **and** the renamed PDFs (`01.pdf`, `02.pdf`, …)\n"
+    "   \n**Now with robust filename matching** (handles spaces, slashes, punctuation) and UUID fallback."
 )
 
 # Claimant details (appear in Excel)
@@ -274,13 +300,15 @@ if xml_up:
         try:
             row = parse_cfdi(f.read())
             row["XML_FileName"] = f.name
-            row["XML_Stem"] = os.path.splitext(f.name)[0].lower()
+            row["XML_Stem"] = normalize_name(f.name)          # normalized
+            row["XML_Stem_raw"] = os.path.splitext(os.path.basename(f.name))[0]
             rows.append(row)
         except Exception as e:
             rows.append(
                 {
                     "XML_FileName": f.name,
-                    "XML_Stem": os.path.splitext(f.name)[0].lower(),
+                    "XML_Stem": normalize_name(f.name),
+                    "XML_Stem_raw": os.path.splitext(os.path.basename(f.name))[0],
                     "UUID": "",
                     "RFC_Emisor": "",
                     "Total_Impuestos": 0.0,
@@ -300,17 +328,28 @@ if xml_up:
     # Assign No.VDR as zero-padded text (01, 02, 03)
     df.insert(0, "No.VDR", [seq_label(i + 1, 2) for i in range(len(df))])
 
-    # Build PDF bytes map by stem
+    # Build PDF bytes map by normalized stem
     pdf_map = {}
+    pdf_name_lookup = {}   # normalized stem -> original pdf name (for messages)
     if pdf_up:
         for p in pdf_up:
-            stem = os.path.splitext(p.name)[0].lower()
-            pdf_map[stem] = p.getvalue()
+            nstem = normalize_name(p.name)
+            pdf_map[nstem] = p.getvalue()
+            pdf_name_lookup[nstem] = os.path.basename(p.name)
 
-    # Match PDFs by stem == XML stem (case-insensitive)
+    # Match PDFs by normalized stem; fallback by UUID substring
     def pdf_name_for_row(r):
-        stem = r.get("XML_Stem", "")
-        return (stem + ".pdf") if (pdf_up and stem in pdf_map) else ""
+        nstem = r.get("XML_Stem", "")
+        uuid = str(r.get("UUID", "") or "").lower()
+        if nstem in pdf_map:
+            return pdf_name_lookup[nstem]
+        # fallback: search any PDF name containing UUID (or first 8 chars)
+        if uuid:
+            short = uuid[:8]
+            for key, orig_name in pdf_name_lookup.items():
+                if uuid in key or short in key:
+                    return orig_name
+        return ""
 
     df["PDF_FileName"] = df.apply(pdf_name_for_row, axis=1)
 
@@ -353,13 +392,14 @@ if xml_up:
         if bad_uuid_rows:
             warnings.append("UUID not 36 chars for rows: " + ", ".join(bad_uuid_rows))
 
-        missing_pdfs = []
-        for _, r in tmp.iterrows():
-            stem = os.path.splitext(str(r.get("XML_FileName","")))[0].lower()
-            if not stem or stem not in pdf_map:
-                missing_pdfs.append(str(r.get("No.VDR","")))
-        if missing_pdfs:
-            warnings.append("Missing matching PDF for rows: " + ", ".join(missing_pdfs))
+        # Build a fresh normalized pdf map (in case names were re-uploaded)
+        pdf_map = {}
+        pdf_name_lookup = {}
+        if pdf_up:
+            for p in pdf_up:
+                nstem = normalize_name(p.name)
+                pdf_map[nstem] = p.getvalue()
+                pdf_name_lookup[nstem] = os.path.basename(p.name)
 
         # Build Excel (export only required columns)
         export_df = tmp[
@@ -374,6 +414,7 @@ if xml_up:
         )
 
         # Build ONE flat package: Excel + PDFs at root (01.pdf, 02.pdf, ...)
+        missing_pdfs_detail = []
         outer = io.BytesIO()
         with zipfile.ZipFile(outer, "w", zipfile.ZIP_DEFLATED) as z:
             # Excel at root
@@ -381,9 +422,26 @@ if xml_up:
             # PDFs at root, renamed by row number
             for _, r in tmp.iterrows():
                 rownum = str(r.get("No.VDR", "") or "").strip()
-                stem = os.path.splitext(str(r.get("XML_FileName", "")))[0].lower()
-                if rownum and stem in pdf_map:
-                    z.writestr(f"{rownum}.pdf", pdf_map[stem])
+                # Use normalized XML stem for lookup; fallback to UUID match
+                xml_stem_raw = os.path.splitext(os.path.basename(str(r.get("XML_FileName",""))))[0]
+                nstem = normalize_name(xml_stem_raw)
+                uuid = str(r.get("UUID","") or "").lower()
+                if rownum:
+                    if nstem in pdf_map:
+                        z.writestr(f"{rownum}.pdf", pdf_map[nstem])
+                    else:
+                        # fallback by UUID substring
+                        placed = False
+                        if uuid:
+                            short = uuid[:8]
+                            for key, data in pdf_map.items():
+                                if uuid in key or short in key:
+                                    z.writestr(f"{rownum}.pdf", data)
+                                    placed = True
+                                    break
+                        if not placed:
+                            missing_pdfs_detail.append(f"{rownum} (expected stem ~ '{nstem}')")
+
             # Optional readme
             readme = (
                 "This package contains:\n"
@@ -406,6 +464,9 @@ if xml_up:
             size_mb = len(carnet_up.getvalue()) / (1024 * 1024)
             if size_mb > 3:
                 warnings.append(f"Carnet PDF is {size_mb:.2f} MB (>3 MB). Consider compressing to ≤ 3 MB.")
+
+        if missing_pdfs_detail:
+            warnings.append("Missing matching PDF for rows: " + ", ".join(missing_pdfs_detail))
 
         if warnings:
             st.warning("Warnings:\n- " + "\n- ".join(warnings))
