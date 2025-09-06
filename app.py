@@ -1,3 +1,6 @@
+Here’s the complete `app.py` with the VAT double-counting fix, robust PDF matching, NaN/Inf sanitization, chronological sort, zero-padded row numbers, claimant header fields, **one flat ZIP download**, and a **timestamp** appended to the download filename (localized to **America/Mexico\_City**):
+
+```python
 import io
 import os
 import re
@@ -6,6 +9,7 @@ import math
 import zipfile
 import unicodedata
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from xml.etree import ElementTree as ET
 
 import pandas as pd
@@ -70,7 +74,7 @@ def parse_cfdi(xml_bytes):
         "cfdi33": "http://www.sat.gobmx/cfd/3",
         "cfdi33_alt": "http://www.sat.gob.mx/cfd/3",
         "cfdi40": "http://www.sat.gob.mx/cfd/4",
-        "cfdi40_alt": "http://www.sat.gob.mx/cfd/4",
+        "cfdi40_alt": "http://www.sat.gobmx/cfd/4",
         "tfd": "http://www.sat.gob.mx/TimbreFiscalDigital",
     }
     root = ET.fromstring(xml_bytes)
@@ -303,6 +307,11 @@ st.markdown(
     "\n**Robust filename matching** with normalization and UUID fallback."
 )
 
+# Localized timestamp for filenames and Requested month header
+local_now = datetime.now(ZoneInfo("America/Mexico_City"))
+requested_month = local_now.strftime("%B %Y")
+ts = local_now.strftime("%Y%m%d-%H%M%S")
+
 # Claimant details
 col_a, col_b, col_c, col_d = st.columns([1.2, 1.2, 1, 0.9])
 with col_a:
@@ -312,8 +321,6 @@ with col_b:
 with col_c:
     ssn_last4 = st.text_input("SSN (LAST 4 DIGITS)", value="", max_chars=4)
 with col_d:
-    now = datetime.now()
-    requested_month = now.strftime("%B %Y")
     st.write("**Requested month**")
     st.info(requested_month)
 
@@ -488,10 +495,11 @@ if xml_up:
             z.writestr("README.txt", readme)
         outer.seek(0)
 
+        # Timestamped filename (local MX time)
         st.download_button(
             "Download Submission_Package.zip",
             outer.getvalue(),
-            file_name="Submission_Package.zip",
+            file_name=f"Submission_Package_{ts}.zip",
         )
 
         # Warnings (non-blocking)
@@ -508,3 +516,4 @@ if xml_up:
 
 else:
     st.info("Upload your CFDI XML files to begin.")
+```
