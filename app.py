@@ -131,3 +131,299 @@ def build_submission_excel_from_df(
             }
         )
         cell = wb.add_format({"border": 1})
+        money = wb.add_format({"num_format": "#,##0.00", "border": 1})
+        center = wb.add_format({"align": "center", "border": 1})
+
+        # Column widths (A..G)
+        ws.set_column("A:A", 10)  # No. VDR
+        ws.set_column("B:B", 44)  # UUID (Factura Number per slide)
+        ws.set_column("C:C", 18)  # RFC
+        ws.set_column("D:D", 14)  # VAT
+        ws.set_column("E:E", 14)  # TOTAL
+        ws.set_column("F:F", 18)  # Type of expense
+        ws.set_column("G:G", 10)  # Currency
+
+        # Title
+        ws.merge_range("A1:G1", "SUBMISSION IVA FORM", title_fmt)
+
+        # Top info rows (exact labels from slide)
+        ws.write("A2", "REQUESTED MONTH:", head_lbl)
+        ws.write("B2", requested_month_text, head_val)
+
+        ws.write("D2", "OFFICIAL E-MAIL:", head_lbl)
+        ws.write("E2", official_email or "", head_val)
+
+        ws.write("F2", "SSN (LAST 4 DIGITS):", head_lbl)
+        ws.write("G2", (ssn_last4 or ""), head_val)
+
+        ws.write("A3", "CLAIMANT NAME:", head_lbl)
+        ws.write("B3", claimant_name or "", head_val)
+
+        # Blue header row
+        ws.write("A5", "No. VDR", header_blue)
+        ws.write("B5", "FACTURA NUMBER (COMPLETE FOLIO FISCAL 36 DIGITS)", header_blue)
+        ws.write("C5", "R.F.C. FROM VENDOR", header_blue)
+        ws.write("D5", "VAT AMOUNT", header_blue)
+        ws.write("E5", "TOTAL AMOUNT", header_blue)
+        ws.write("F5", "TYPE OF EXPENSE", header_blue)
+        ws.write("G5", "CURRENCY", header_blue)
+
+        # Ensure expected columns & order
+        needed = [
+            "No.VDR",
+            "UUID",
+            "RFC_Emisor",
+            "Total_Impuestos",
+            "Total_Comprobante",
+            "Type",
+            "Currency",
+        ]
+        for c in needed:
+            if c not in df.columns:
+                df[c] = ""
+
+        df = df[needed].copy()
+        if df.empty:
+            df.loc[0] = ["01", "", "", 0.0, 0.0, "Miscellaneous", "MXN"]
+
+        # Write table rows (No.VDR kept as TEXT with leading zeros)
+        start = 5
+        for i, row in df.iterrows():
+            ws.write(start + i, 0, str(row["No.VDR"]), center)  # keep leading zeros
+            ws.write(start + i, 1, str(row["UUID"]), cell)
+            ws.write(start + i, 2, str(row["RFC_Emisor"]), cell)
+
+            # numeric VAT/TOTAL
+            try:
+                vat = float(row["Total_Impuestos"] or 0)
+            except Exception:
+                vat = 0.0
+            try:
+                tot = float(row["Total_Comprobante"] or 0)
+            except Exception:
+                tot = 0.0
+
+            ws.write_number(start + i, 3, vat, money)
+            ws.write_number(start + i, 4, tot, money)
+            ws.write(start + i, 5, str(row["Type"] or "Miscellaneous"), cell)
+            ws.write(start + i, 6, str(row["Currency"] or "MXN"), center)
+
+        # Validations on body range
+        last = start + max(len(df), 50)
+        ws.data_validation(
+            start, 5, last, 5, {"validate": "list", "source": ["Miscellaneous", "Gasoline"]}
+        )
+        ws.data_validation(start, 6, last, 6, {"validate": "list", "source": ["MXN", "USD"]})
+        ws.data_validation(
+            start,
+            1,
+            last,
+            1,
+            {
+                "validate": "length",
+                "criteria": "equal to",
+                "value": 36,
+                "input_title": "Folio Fiscal (UUID)",
+                "input_message": "Debe tener exactamente 36 caracteres (incluye guiones).",
+                "error_title": "Longitud inválida",
+                "error_message": "El UUID debe tener 36 caracteres.",
+            },
+        )
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ------------------------------
+# STREAMLIT APP
+# ------------------------------
+st.set_page_config(page_title="Personal IVA – Excel & ZIP Builder", layout="wide")
+st.title("Personal IVA – Excel & ZIP Builder")
+
+st.markdown(
+    "Upload your **CFDI XML** and **matching PDF facturas**.\n\n"
+    "- Entries are sorted **chronologically** by the XML `Fecha`.\n"
+    "- **No. VDR** is assigned as *text* with leading zeros (e.g., 01, 02, 03).\n"
+    "- XML and PDF are **matched by filename stem** (name without extension).\n"
+    "- ZIP includes **only PDFs**, renamed to the row number: `01.pdf`, `02.pdf`, …\n"
+    "- Provide claimant details; they appear in the Excel header."
+)
+
+# Claimant details (appear in Excel)
+col_a, col_b, col_c, col_d = st.columns([1.2, 1.2, 1, 0.9])
+with col_a:
+    claimant_name = st.text_input("CLAIMANT NAME", value="", placeholder="First Last")
+with col_b:
+    official_email = st.text_input("OFFICIAL E-MAIL", value="", placeholder="you@state.gov")
+with col_c:
+    ssn_last4 = st.text_input("SSN (LAST 4 DIGITS)", value="", max_chars=4)
+with col_d:
+    # Requested month auto: current month + year
+    now = datetime.now()
+    requested_month = now.strftime("%B %Y")
+    st.write("**Requested month**")
+    st.info(requested_month)
+
+# Uploaders
+xml_up = st.file_uploader("Upload CFDI XML files", type=["xml"], accept_multiple_files=True)
+pdf_up = st.file_uploader("Upload matching PDF facturas", type=["pdf"], accept_multiple_files=True)
+carnet_up = st.file_uploader("Upload SRE Carnet (optional – warning only)", type=["pdf"])
+
+rows = []
+if xml_up:
+    # Parse all XMLs (collect Fecha for sorting)
+    for f in xml_up:
+        try:
+            row = parse_cfdi(f.read())
+            row["XML_FileName"] = f.name
+            row["XML_Stem"] = os.path.splitext(f.name)[0].lower()
+            rows.append(row)
+        except Exception as e:
+            rows.append(
+                {
+                    "XML_FileName": f.name,
+                    "XML_Stem": os.path.splitext(f.name)[0].lower(),
+                    "UUID": "",
+                    "RFC_Emisor": "",
+                    "Total_Impuestos": 0.0,
+                    "Total_Comprobante": 0.0,
+                    "Currency": "MXN",
+                    "Type": "Miscellaneous",
+                    "Fecha": datetime(1970, 1, 1),
+                    "Notas": f"Parse error: {e}",
+                }
+            )
+
+    df = pd.DataFrame(rows)
+
+    # Chronological order by Fecha (ascending)
+    df = df.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
+
+    # Assign No.VDR as zero-padded text (01, 02, 03)
+    df.insert(0, "No.VDR", [seq_label(i + 1, 2) for i in range(len(df))])
+
+    # Build PDF stem index
+    pdf_map = {}
+    if pdf_up:
+        for p in pdf_up:
+            stem = os.path.splitext(p.name)[0].lower()
+            pdf_map[stem] = p.getvalue()  # content bytes
+
+    # Match PDFs by stem == XML stem (case-insensitive)
+    def pdf_name_for_row(r):
+        stem = r.get("XML_Stem", "")
+        return (stem + ".pdf") if (pdf_up and stem in pdf_map) else ""
+
+    df["PDF_FileName"] = df.apply(pdf_name_for_row, axis=1)
+
+    # Show editable grid (Type + Currency as dropdowns). We include Fecha for visibility,
+    # but Excel export will NOT include Fecha.
+    st.subheader("Preview / Edit (chronological)")
+    show_cols = [
+        "No.VDR",
+        "UUID",
+        "RFC_Emisor",
+        "Total_Impuestos",
+        "Total_Comprobante",
+        "Type",
+        "Currency",
+        "Fecha",
+        "XML_FileName",
+        "PDF_FileName",
+    ]
+    edited = st.data_editor(
+        df[show_cols],
+        num_rows="dynamic",
+        column_config={
+            "Type": st.column_config.SelectboxColumn(options=["Miscellaneous", "Gasoline"]),
+            "Currency": st.column_config.SelectboxColumn(options=["MXN", "USD"]),
+        },
+        use_container_width=True,
+        height=500,
+    )
+
+    st.caption(
+        "Note: the Excel **only** contains the columns shown in the slide "
+        "(No. VDR, UUID, RFC, VAT, TOTAL, Type, Currency). "
+        "Other columns here are for your convenience and will not be exported."
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if st.button("Generate Excel (Submission Template)"):
+            # Ensure ordering by Fecha before export, re-assign No.VDR (as text) in case user edited
+            tmp = edited.copy()
+            if "Fecha" in tmp.columns:
+                tmp = tmp.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
+            tmp["No.VDR"] = [seq_label(i + 1, 2) for i in range(len(tmp))]
+
+            # Build only the required columns for Excel
+            export_df = tmp[
+                [
+                    "No.VDR",
+                    "UUID",
+                    "RFC_Emisor",
+                    "Total_Impuestos",
+                    "Total_Comprobante",
+                    "Type",
+                    "Currency",
+                ]
+            ].copy()
+
+            xlsx_bytes = build_submission_excel_from_df(
+                export_df,
+                claimant_name=claimant_name.strip(),
+                official_email=official_email.strip(),
+                ssn_last4=ssn_last4.strip(),
+                requested_month_text=requested_month,
+            )
+            st.download_button(
+                "Download SUBMISSION_IVA_FORM.xlsx",
+                xlsx_bytes,
+                file_name="SUBMISSION_IVA_FORM.xlsx",
+            )
+
+    with c2:
+        if st.button("Build ZIP of PDFs (renamed to row number)"):
+            if not pdf_up:
+                st.error("Please upload the factura PDFs first.")
+            else:
+                # Sort by Fecha again, re-number rows 01..N, then add PDFs as 01.pdf, 02.pdf...
+                tmp = edited.copy()
+                if "Fecha" in tmp.columns:
+                    tmp = tmp.sort_values(by="Fecha", ascending=True).reset_index(drop=True)
+                tmp["No.VDR"] = [seq_label(i + 1, 2) for i in range(len(tmp))]
+
+                buf = io.BytesIO()
+                errors = []
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+                    for _, r in tmp.iterrows():
+                        label = str(r.get("No.VDR", "") or "").strip()
+                        xml_stem = os.path.splitext(str(r.get("XML_FileName", "")))[0].lower()
+                        if not label:
+                            errors.append("Missing No.VDR label for a row.")
+                            continue
+                        if not xml_stem or xml_stem not in pdf_map:
+                            errors.append(f"No matching PDF found for XML '{xml_stem or '?'}'.")
+                            continue
+                        z.writestr(f"{label}.pdf", pdf_map[xml_stem])
+
+                st.download_button(
+                    "Download Facturas_PDFs.zip", buf.getvalue(), file_name="Facturas_PDFs.zip"
+                )
+                if errors:
+                    st.warning("Some issues:\n- " + "\n- ".join(errors))
+
+    # Carnet warning only (no blocking)
+    if carnet_up is not None:
+        size_mb = len(carnet_up.getvalue()) / (1024 * 1024)
+        if size_mb > 3:
+            st.warning(
+                f"Carnet PDF is {size_mb:.2f} MB (>3 MB). Consider compressing to ≤ 3 MB (portrait)."
+            )
+        else:
+            st.info(f"Carnet PDF size looks OK: {size_mb:.2f} MB (≤ 3 MB).")
+
+else:
+    st.info("Upload your CFDI XML files to begin.")
