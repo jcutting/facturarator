@@ -513,4 +513,3 @@ if xml_up:
 
 else:
     st.info("Upload your CFDI XML files to begin.")
-```
